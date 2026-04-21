@@ -15,3 +15,7 @@ using System.Runtime.InteropServices;
 
 [assembly: AssemblyVersion("0.30.0")]
 [assembly: AssemblyFileVersion("0.30.0")]
+
+// Tell KSP's AssemblyLoader that this is a managed KSP assembly so the addon
+// binder can resolve it before any dependent assembly (e.g. LmpClient) is loaded.
+[assembly: KSPAssembly("LmpCommon", 0, 30)]

@@ -46,4 +46,7 @@ using System.Runtime.CompilerServices;
 [assembly: TypeForwardedTo(typeof(LmpCommon.Enums.MasterServerMessageType))]
 [assembly: TypeForwardedTo(typeof(LmpCommon.Enums.ServerMessageType))]
 
+// Declare that LMP depends on LmpCommon so KSP's loader resolves LmpCommon first,
+// preventing the "ADDON BINDER: Cannot resolve assembly: LmpCommon" warnings.
+[assembly: KSPAssemblyDependency("LmpCommon", 0, 30)]
 [assembly: KSPAssembly("LMP", 0, 30)]

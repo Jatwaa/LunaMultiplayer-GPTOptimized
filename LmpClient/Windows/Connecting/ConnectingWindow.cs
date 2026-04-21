@@ -40,6 +40,13 @@ namespace LmpClient.Windows.Connecting
             (ClientState.Starting,             "Start game"),
         };
 
+        // ── State-transition logging ──────────────────────────────────────────
+        // DrawWindowContent is called every GUI frame; we only want one log line
+        // per state change, not one per frame.  Track the last state we logged.
+
+        private static ClientState _lastLoggedState = ClientState.Disconnected;
+        private static bool        _failureLogged   = false;
+
         // ── Styles ────────────────────────────────────────────────────────────
 
         private static GUIStyle _styleDone;
@@ -151,6 +158,33 @@ namespace LmpClient.Windows.Connecting
             var failed  = state <= ClientState.Disconnected || state == ClientState.DisconnectRequested;
             var failAt  = NetworkConnection.LastFailedAtState;
             var reason  = NetworkConnection.LastFailureReason;
+
+            // ── Transition logging (one line per state change) ─────────────────
+            if (!failed && state != _lastLoggedState)
+            {
+                // Find the human-readable label for the current state
+                string stepLabel = null;
+                foreach (var (trigger, label) in Steps)
+                {
+                    if (trigger == state) { stepLabel = label; break; }
+                }
+
+                if (state == ClientState.Running)
+                    LunaLog.Log("[LMP] Connection established — game running.");
+                else if (stepLabel != null)
+                    LunaLog.Log($"[LMP] Connecting: {stepLabel} ({state})");
+                else if (state == ClientState.Connecting)
+                    LunaLog.Log("[LMP] Connecting to server...");
+
+                _lastLoggedState = state;
+                _failureLogged   = false;   // reset so next failure is logged fresh
+            }
+            else if (failed && !_failureLogged && !string.IsNullOrEmpty(reason))
+            {
+                LunaLog.LogWarning($"[LMP] Connection failed at '{failAt}': {reason}");
+                _lastLoggedState = state;
+                _failureLogged   = true;
+            }
 
             GUILayout.Space(4);
 
