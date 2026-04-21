@@ -205,19 +205,38 @@ namespace Server.Message
         {
             var data = (VesselRemoveMsgData)message;
 
-            if (LockSystem.LockQuery.ControlLockExists(data.VesselId) && !LockSystem.LockQuery.ControlLockBelongsToPlayer(data.VesselId, client.PlayerName))
+            // ── Lock check: another player is actively piloting this vessel ──
+            if (LockSystem.LockQuery.ControlLockExists(data.VesselId) &&
+                !LockSystem.LockQuery.ControlLockBelongsToPlayer(data.VesselId, client.PlayerName))
+            {
+                LunaLog.Warning($"Remove denied — {client.PlayerName} tried to remove vessel " +
+                    $"{data.VesselId} controlled by another player.");
                 return;
+            }
+
+            // ── Owner check: only the recorded owner may delete their craft ──
+            // addToKillList=false signals a revert (same vessel ID will be reused),
+            // so we skip the owner guard to allow the relaunch proto through.
+            var owner = VesselStoreSystem.GetOwner(data.VesselId);
+            if (owner != null && owner != client.PlayerName && data.AddToKillList)
+            {
+                LunaLog.Warning($"Remove denied — {client.PlayerName} tried to permanently " +
+                    $"remove vessel {data.VesselId} owned by '{owner}'.");
+                return;
+            }
 
             if (VesselStoreSystem.VesselExists(data.VesselId))
             {
-                LunaLog.Debug($"Removing vessel {data.VesselId} from {client.PlayerName}");
+                var verb = data.AddToKillList ? "Removing" : "Revert-clearing";
+                LunaLog.Debug($"{verb} vessel {data.VesselId} (owner: {owner ?? "unknown"}) " +
+                    $"requested by {client.PlayerName}");
                 VesselStoreSystem.RemoveVessel(data.VesselId);
             }
 
             if (data.AddToKillList)
                 VesselContext.RemovedVessels.TryAdd(data.VesselId, 0);
 
-            //Relay the message.
+            // Relay to all clients so they despawn the vessel
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, data);
         }
 
@@ -242,10 +261,15 @@ namespace Server.Message
             if (!IsVesselNameValid(vesselText, msgData.VesselId, client.PlayerName))
                 return;
 
-            if (!VesselStoreSystem.VesselExists(msgData.VesselId))
+            var isNew = !VesselStoreSystem.VesselExists(msgData.VesselId);
+            if (isNew)
             {
                 LunaLog.Debug($"Saving vessel {msgData.VesselId} ({ByteSize.FromBytes(msgData.NumBytes).KiloBytes} KB) from {client.PlayerName}.");
             }
+
+            // Record the first sender as the permanent owner (first-sender-wins).
+            // SetOwnerIfAbsent is a no-op when an owner is already recorded.
+            VesselStoreSystem.SetOwnerIfAbsent(msgData.VesselId, client.PlayerName);
 
             VesselDataUpdater.RawConfigNodeInsertOrUpdate(msgData.VesselId, vesselText);
             _vesselProtoVersion[msgData.VesselId] = Interlocked.Increment(ref _vesselVersionCounter);

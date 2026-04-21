@@ -15,26 +15,71 @@ namespace Server.System
     public static class VesselStoreSystem
     {
         public const string VesselFileFormat = ".txt";
+        public const string OwnerFileFormat  = ".owner";
         public static string VesselsPath = Path.Combine(ServerContext.UniverseDirectory, "Vessels");
 
-        public static ConcurrentDictionary<Guid, Vessel.Classes.Vessel> CurrentVessels = new ConcurrentDictionary<Guid, Vessel.Classes.Vessel>();
+        public static ConcurrentDictionary<Guid, Vessel.Classes.Vessel> CurrentVessels
+            = new ConcurrentDictionary<Guid, Vessel.Classes.Vessel>();
+
+        /// <summary>
+        /// Maps vessel GUID → the player name that first sent a proto for it.
+        /// Used to validate remove/revert requests so only the owner can delete their craft.
+        /// Persisted to {vesselId}.owner files alongside the vessel .txt files.
+        /// </summary>
+        public static readonly ConcurrentDictionary<Guid, string> VesselOwners
+            = new ConcurrentDictionary<Guid, string>();
 
         private static readonly object BackupLock = new object();
 
         public static bool VesselExists(Guid vesselId) => CurrentVessels.ContainsKey(vesselId);
 
+        // ── Ownership API ────────────────────────────────────────────────────
+
         /// <summary>
-        /// Removes a vessel from the store
+        /// Records the first player to send a proto for <paramref name="vesselId"/> as its owner.
+        /// Subsequent calls for the same vessel are ignored — first sender wins.
+        /// </summary>
+        public static void SetOwnerIfAbsent(Guid vesselId, string playerName)
+        {
+            if (VesselOwners.TryAdd(vesselId, playerName))
+            {
+                // Persist so ownership survives server restarts
+                _ = Task.Run(() =>
+                {
+                    lock (BackupLock)
+                    {
+                        FileHandler.WriteToFile(
+                            Path.Combine(VesselsPath, $"{vesselId}{OwnerFileFormat}"),
+                            playerName);
+                    }
+                });
+                LunaLog.Debug($"Vessel {vesselId} owner set to '{playerName}'.");
+            }
+        }
+
+        /// <summary>Returns the recorded owner of a vessel, or <c>null</c> if unknown.</summary>
+        public static string GetOwner(Guid vesselId)
+            => VesselOwners.TryGetValue(vesselId, out var owner) ? owner : null;
+
+        // ── Remove ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Removes a vessel from the store and deletes its files from disk.
         /// </summary>
         public static void RemoveVessel(Guid vesselId)
         {
             CurrentVessels.TryRemove(vesselId, out _);
+            VesselOwners.TryRemove(vesselId, out _);
 
             _ = Task.Run(() =>
             {
                 lock (BackupLock)
                 {
                     FileHandler.FileDelete(Path.Combine(VesselsPath, $"{vesselId}{VesselFileFormat}"));
+
+                    var ownerFile = Path.Combine(VesselsPath, $"{vesselId}{OwnerFileFormat}");
+                    if (File.Exists(ownerFile))
+                        FileHandler.FileDelete(ownerFile);
                 }
             });
         }
@@ -49,13 +94,14 @@ namespace Server.System
         }
 
         /// <summary>
-        /// Load the stored vessels into the dictionary
+        /// Load the stored vessels (and their ownership records) into the dictionaries.
         /// </summary>
         public static void LoadExistingVessels()
         {
             ChangeExistingVesselFormats();
             lock (BackupLock)
             {
+                // Load vessel data
                 foreach (var file in Directory.GetFiles(VesselsPath).Where(f => Path.GetExtension(f) == VesselFileFormat))
                 {
                     if (!Guid.TryParse(Path.GetFileNameWithoutExtension(file), out var vesselId))
@@ -81,6 +127,19 @@ namespace Server.System
                         LunaLog.Error($"Failed to parse vessel file {Path.GetFileName(file)}: {ex.Message} — skipping.");
                     }
                 }
+
+                // Load ownership records (.owner files written by SetOwnerIfAbsent)
+                foreach (var file in Directory.GetFiles(VesselsPath).Where(f => Path.GetExtension(f) == OwnerFileFormat))
+                {
+                    if (!Guid.TryParse(Path.GetFileNameWithoutExtension(file), out var vesselId))
+                        continue;
+
+                    var ownerName = FileHandler.ReadFileText(file)?.Trim();
+                    if (!string.IsNullOrEmpty(ownerName))
+                        VesselOwners.TryAdd(vesselId, ownerName);
+                }
+
+                LunaLog.Normal($"Loaded {CurrentVessels.Count} vessels, {VesselOwners.Count} ownership records.");
             }
         }
 

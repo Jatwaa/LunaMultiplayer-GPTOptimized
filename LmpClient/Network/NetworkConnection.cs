@@ -17,6 +17,14 @@ namespace LmpClient.Network
         private static readonly object DisconnectLock = new object();
         public static volatile bool ResetRequested;
 
+        // ── Failure tracking (read by ConnectingWindow) ───────────────────────
+        /// <summary>Human-readable reason for the last disconnect (empty = clean disconnect).</summary>
+        public static volatile string LastFailureReason = "";
+        /// <summary>Environment.TickCount at the moment of failure, for linger-display timing.</summary>
+        public static volatile int LastFailureTickCount = 0;
+        /// <summary>The ClientState we were in when the failure occurred.</summary>
+        public static volatile ClientState LastFailedAtState = ClientState.Disconnected;
+
         /// <summary>
         /// Disconnects the network system. You should kill threads ONLY from main thread
         /// </summary>
@@ -27,6 +35,11 @@ namespace LmpClient.Network
             {
                 if (MainSystem.NetworkState > ClientState.Disconnected)
                 {
+                    // Capture state BEFORE changing it so the UI can show which step failed
+                    LastFailedAtState   = MainSystem.NetworkState;
+                    LastFailureReason   = reason ?? "";
+                    LastFailureTickCount = System.Environment.TickCount;
+
                     //DO NOT set networkstate as disconnected as we are in another thread!
                     MainSystem.NetworkState = ClientState.DisconnectRequested;
 
@@ -68,6 +81,9 @@ namespace LmpClient.Network
         {
             if (MainSystem.NetworkState > ClientState.Disconnected || endpoints == null || endpoints.Length == 0)
                 return;
+
+            // Clear any previous failure display when starting a fresh connection attempt
+            LastFailureReason = "";
 
             MainSystem.NetworkState = ClientState.Connecting;
 
