@@ -214,15 +214,27 @@ namespace Server.Message
                 return;
             }
 
-            // ── Owner check: only the recorded owner may delete their craft ──
+            // ── Owner check ──────────────────────────────────────────────────
             // addToKillList=false signals a revert (same vessel ID will be reused),
-            // so we skip the owner guard to allow the relaunch proto through.
+            // so we always allow revert-style removes through regardless of ownership.
+            //
+            // For permanent removes (addToKillList=true) we enforce ownership ONLY while
+            // the owner is still actively piloting the vessel (holds a control lock).
+            // Once the owner leaves flight the lock releases, stock revert is no longer
+            // possible, and any player or the server's own cleanup may delete the craft.
             var owner = VesselStoreSystem.GetOwner(data.VesselId);
             if (owner != null && owner != client.PlayerName && data.AddToKillList)
             {
-                LunaLog.Warning($"Remove denied — {client.PlayerName} tried to permanently " +
-                    $"remove vessel {data.VesselId} owned by '{owner}'.");
-                return;
+                var ownerHasControlLock = LockSystem.LockQuery.ControlLockBelongsToPlayer(data.VesselId, owner);
+                if (ownerHasControlLock)
+                {
+                    LunaLog.Warning($"Remove denied — {client.PlayerName} tried to permanently remove " +
+                        $"vessel {data.VesselId} while it is actively controlled by owner '{owner}'.");
+                    return;
+                }
+                // Owner has no active control lock = they left flight = cleanup permitted
+                LunaLog.Debug($"Remove of vessel {data.VesselId} by {client.PlayerName} allowed — " +
+                    $"owner '{owner}' no longer has an active control lock.");
             }
 
             if (VesselStoreSystem.VesselExists(data.VesselId))

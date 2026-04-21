@@ -27,6 +27,7 @@ namespace LmpClient.Systems.Revert
             VesselAssemblyEvent.onAssembledVessel.Add(RevertEvents.VesselAssembled);
             GameEvents.onVesselChange.Add(RevertEvents.OnVesselChange);
             RevertEvent.onRevertedToLaunch.Add(RevertEvents.OnRevertToLaunch);
+            RevertEvent.onReturningToEditor.Add(RevertEvents.OnReturningToEditor);   // VAB/SPH revert
             GameEvents.onGameSceneLoadRequested.Add(RevertEvents.GameSceneLoadRequested);
         }
 
@@ -36,6 +37,7 @@ namespace LmpClient.Systems.Revert
             VesselAssemblyEvent.onAssembledVessel.Remove(RevertEvents.VesselAssembled);
             GameEvents.onVesselChange.Remove(RevertEvents.OnVesselChange);
             RevertEvent.onRevertedToLaunch.Remove(RevertEvents.OnRevertToLaunch);
+            RevertEvent.onReturningToEditor.Remove(RevertEvents.OnReturningToEditor); // VAB/SPH revert
             GameEvents.onGameSceneLoadRequested.Remove(RevertEvents.GameSceneLoadRequested);
         }
 
