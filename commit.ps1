@@ -176,6 +176,17 @@ if ($pushNow) {
     Write-Warn "Skipped push. Run: git push origin $branch"
 }
 
+# ── 7. Optional release ───────────────────────────────────────────────────────
+Write-Host ""
+if ($pushNow -and (Prompt-YN "Publish a GitHub release now? (runs release.ps1)")) {
+    $relScript = Join-Path $PSScriptRoot "release.ps1"
+    if (Test-Path $relScript) {
+        & powershell -ExecutionPolicy Bypass -File $relScript
+    } else {
+        Write-Err "release.ps1 not found at $relScript"
+    }
+}
+
 Write-Host ""
 Write-Success "Done. Have a great session!"
 Write-Host ""

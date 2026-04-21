@@ -174,9 +174,43 @@ changes. On each run it:
 1. Shows `git status` and a diff summary.
 2. Prompts for a short change description and optional detail.
 3. Appends a timestamped entry to `LMP_0.30_2026.md`.
-4. Stages all tracked changes, commits with a generated message, and pushes to `origin/main`.
+4. Stages all tracked changes, commits with a generated message, and pushes to `origin/master`.
+5. Optionally launches `release.ps1` immediately after push.
 
 Run with: `powershell -ExecutionPolicy Bypass -File commit.ps1`
+
+---
+
+### `release.ps1` — release packager & publisher
+**File:** `release.ps1` (repo root)
+
+PowerShell script that packages locally-built binaries into distributable ZIPs and
+publishes a versioned GitHub release via the `gh` CLI. On each run it:
+
+1. Reads the version from `LmpCommon/Properties/AssemblyInfo.cs`.
+2. Verifies that `LmpClient/bin/Release/` and `Server/bin/Release/net8.0/` are populated.
+3. Builds **`LMP-{version}-Client.zip`** with the correct KSP `GameData/` layout:
+   - `GameData/LunaMultiplayer/` — `LmpClient.dll`, `LmpCommon.dll`, `LmpGlobal.dll`,
+     `Lidgren.Network.dll`, `CachedQuickLz.dll`, `JsonFx.dll`, `System.Runtime.Serialization.dll`
+   - `GameData/000_Harmony/` — `0Harmony.dll`, `HarmonyInstallChecker.dll`, `Harmony.version`
+4. Builds **`LMP-{version}-Server.zip`** with the `LMPServer/` folder (excludes `.pdb` files
+   and runtime-created dirs: `logs/`, `Universe/`, `Config/`).
+5. Creates a GitHub release tagged `v{version}` and uploads both ZIPs as assets.
+6. On tag conflict, uploads assets to the existing release instead.
+
+**Prerequisites:** `gh` CLI installed (`https://cli.github.com`) and authenticated (`gh auth login`).
+
+Run with: `powershell -ExecutionPolicy Bypass -File release.ps1`
+Or triggered automatically at the end of `commit.ps1`.
+
+---
+
+### `.github/workflows/release.yml` — CI release verification
+**File:** `.github/workflows/release.yml`
+
+GitHub Actions workflow triggered when a `v*.*.*` tag is pushed. It:
+1. Builds and tests the server project on Ubuntu to verify the tag is clean.
+2. Marks the GitHub release as latest and updates its notes from `LMP_0.30_2026.md`.
 
 ---
 
