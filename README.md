@@ -25,19 +25,22 @@
 
 ---
 Q: What is this?
-A: 
-It is a project to throw all the tools at a game and project I love, Luna Multiplayer & Kerbal Space Program. 
+
+A: It is a project to throw all the tools at a game and project I love, Luna Multiplayer & Kerbal Space Program. 
 I took a massive hiatus after KSP 2, recently started playing again and wanted to enjoy it with others.
 With the onset of AI tools that are more adept at bug hunting and process implementation, this project leans heavily on it. 
 On Discord, we test, confim, and think of ideas to add/update in Luna Multiplayer and use AI tools to correct/implement.
 
 Q: Why not learn the code and do it yourself. AI is Evil
+
 A: I don't have time, I am a father first, gamer second. Coder far last. AI will be used in this project. 
 
 Q: Can I get involved? 
+
 A: Sure, join us on the JDSA Discord https://discord.gg/zzhtgYB
 
 Q: Does Dagger know? 
+
 A: I dunno! I haven't seen Dagger login in some time. This is to build on the greatness that was created. So this is to get it to more people. 
 ---
 # Luna Multiplayer Mod (LMP)
