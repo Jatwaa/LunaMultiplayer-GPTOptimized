@@ -24,6 +24,10 @@
 </p>
 
 ---
+WHAT'S UP PEOPLE! It's your boy Jatwaa from https://www.youtube.com/@BillyWinnJr 
+
+Kinda back. Just not a Youtube video. 
+
 Q: What is this?
 
 A: It is a project to throw all the tools at a game and project I love, Luna Multiplayer & Kerbal Space Program. 
