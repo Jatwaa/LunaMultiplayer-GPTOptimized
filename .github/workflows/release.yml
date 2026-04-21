@@ -7,9 +7,9 @@ on:
       - "v*.*.*"
 
 jobs:
-  # ── Verify the server builds cleanly on CI ─────────────────────────────────
-  verify:
-    name: Verify server build
+  # -- Build & test the server on Ubuntu ------------------------------------
+  build-server:
+    name: Build & test server
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,29 +22,67 @@ jobs:
       - name: Restore
         run: dotnet restore Server
 
-      - name: Build
+      - name: Build (Release)
         run: dotnet build Server -c Release --no-restore
 
       - name: Test
         run: dotnet test ServerTest -c Release --verbosity minimal
 
-  # ── Attach a note to the GitHub release pointing to the uploaded assets ─────
-  annotate:
-    name: Annotate release
+      - name: Package server
+        run: |
+          mkdir -p _dist/LMPServer
+          rsync -a --exclude='*.pdb' \
+            --exclude='logs' --exclude='Universe' --exclude='Config' \
+            --exclude='runtimes' \
+            Server/bin/Release/net8.0/ _dist/LMPServer/
+          cd _dist
+          zip -r ../LMP-${{ github.ref_name }}-Server.zip LMPServer/
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-zip
+          path: LMP-${{ github.ref_name }}-Server.zip
+
+  # -- Create the GitHub release and attach the server ZIP ------------------
+  publish:
+    name: Create GitHub release
     runs-on: ubuntu-latest
-    needs: verify
+    needs: build-server
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mark release as verified
+      - name: Download server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-zip
+
+      - name: Extract release notes from changelog
+        id: notes
+        run: |
+          python3 - <<'EOF'
+          import re, sys
+          text = open("LMP_0.30_2026.md").read()
+          m = re.search(r'---\n\n(### \[.*?)---', text, re.DOTALL)
+          notes = m.group(1).strip() if m else "See LMP_0.30_2026.md for full change log."
+          open("release_notes.md","w").write(notes)
+          EOF
+
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          gh release edit "$TAG" \
-            --prerelease=false \
-            --latest=true \
-            --notes-file LMP_0.30_2026.md \
-            || echo "Release edit skipped (may not exist yet)"
+          SERVER_ZIP="LMP-${TAG}-Server.zip"
+
+          # Create release (ignore error if it already exists from release.ps1)
+          gh release create "$TAG" \
+            --title "LMP ${TAG}" \
+            --notes-file release_notes.md \
+            "$SERVER_ZIP" \
+            || gh release upload "$TAG" "$SERVER_ZIP" --clobber
+
+          # Mark as latest
+          gh release edit "$TAG" --latest=true

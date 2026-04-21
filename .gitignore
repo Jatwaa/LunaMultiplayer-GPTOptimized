@@ -36,3 +36,7 @@ compile_log*.txt
 
 # Claude session data
 .claude/
+
+# Local GitHub token (never commit)
+.github_token
+_release_staging/
