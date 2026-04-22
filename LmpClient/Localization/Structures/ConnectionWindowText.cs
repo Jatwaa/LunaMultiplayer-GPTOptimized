@@ -8,6 +8,7 @@
         public string Port { get; set; } = "Port:";
         public string Password { get; set; } = "Password:";
         public string CustomServers { get; set; } = "Custom servers:";
+        public string FavoriteServers { get; set; } = "Favorite servers:";
 
         public string Connect { get; set; } = "Connect";
         public string Settings { get; set; } = "Settings";

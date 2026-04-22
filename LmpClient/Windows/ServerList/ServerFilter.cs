@@ -1,4 +1,4 @@
-﻿using LmpClient.Localization;
+using LmpClient.Localization;
 using LmpClient.Systems.SettingsSys;
 using LmpCommon;
 using UnityEngine;
@@ -7,9 +7,13 @@ namespace LmpClient.Windows.ServerList
 {
     public class ServerFilter
     {
+        private static string _searchText = "";
+
         public static void DrawFilters()
         {
             GUILayout.BeginHorizontal();
+            GUILayout.Label(LocalizationContainer.ServerListFiltersText.Search, GUILayout.Width(50));
+            _searchText = GUILayout.TextField(_searchText, GUILayout.Width(180));
             GUILayout.FlexibleSpace();
             var hideFullServers = GUILayout.Toggle(SettingsSystem.CurrentSettings.ServerFilters.HideFullServers, LocalizationContainer.ServerListFiltersText.HideFullServers);
             if (hideFullServers != SettingsSystem.CurrentSettings.ServerFilters.HideFullServers)
@@ -39,6 +43,13 @@ namespace LmpClient.Windows.ServerList
                 SettingsSystem.SaveSettings();
             }
             GUILayout.FlexibleSpace();
+            var favoritesOnly = GUILayout.Toggle(SettingsSystem.CurrentSettings.ServerFilters.FavoritesOnly, LocalizationContainer.ServerListFiltersText.FavoritesOnly);
+            if (favoritesOnly != SettingsSystem.CurrentSettings.ServerFilters.FavoritesOnly)
+            {
+                SettingsSystem.CurrentSettings.ServerFilters.FavoritesOnly = favoritesOnly;
+                SettingsSystem.SaveSettings();
+            }
+            GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
         }
 
@@ -55,6 +66,18 @@ namespace LmpClient.Windows.ServerList
 
             if (SettingsSystem.CurrentSettings.ServerFilters.DedicatedServersOnly && !server.DedicatedServer)
                 return false;
+
+            if (SettingsSystem.CurrentSettings.ServerFilters.FavoritesOnly && !ServerListWindow.IsFavorite(server))
+                return false;
+
+            if (!string.IsNullOrEmpty(_searchText))
+            {
+                var search = _searchText.ToLowerInvariant();
+                var nameMatch = server.ServerName != null && server.ServerName.ToLowerInvariant().Contains(search);
+                var descMatch = server.Description != null && server.Description.ToLowerInvariant().Contains(search);
+                if (!nameMatch && !descMatch)
+                    return false;
+            }
 
             return true;
         }

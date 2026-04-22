@@ -29,6 +29,7 @@ namespace LmpClient.Systems.SettingsSys
         public bool AutoExpandMtu { get; set; } = false;
         public float TimeoutSeconds { get; set; } = 15;
         public ServerFilters ServerFilters { get; set; } = new ServerFilters();
+        public List<FavoriteServerEntry> FavoriteServers { get; set; } = new List<FavoriteServerEntry>();
 
         public string CustomMasterServer { get; set; } = "";
 
@@ -59,11 +60,20 @@ namespace LmpClient.Systems.SettingsSys
     }
 
     [Serializable]
+    public class FavoriteServerEntry
+    {
+        public string Name { get; set; } = "";
+        public string Address { get; set; } = "";
+        public int Port { get; set; } = 8800;
+    }
+
+    [Serializable]
     public class ServerFilters
     {
         public bool HidePrivateServers { get; set; } = false;
         public bool HideFullServers { get; set; } = true;
         public bool HideEmptyServers { get; set; } = false;
         public bool DedicatedServersOnly { get; set; } = false;
+        public bool FavoritesOnly { get; set; } = false;
     }
 }

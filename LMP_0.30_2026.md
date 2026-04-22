@@ -5,6 +5,10 @@ upstream `0.29.1` release. Changes are listed newest-first within each section.
 
 ---
 
+### [2026-04-22 10:44] Updates -- Updated the server browser and added in a Favorites with sticky header and search capabilities
+
+---
+
 ## Version
 
 | Component | Old | New |

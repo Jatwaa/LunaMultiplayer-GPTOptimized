@@ -1,6 +1,7 @@
 ﻿using LmpClient.Base;
 using LmpClient.Localization;
 using LmpClient.Network;
+using LmpClient.Systems.SettingsSys;
 using LmpCommon;
 using LmpCommon.Enums;
 using System.Collections.Generic;
@@ -139,8 +140,10 @@ namespace LmpClient.Windows.ServerList
             if (Display)
             {
                 DisplayedServers.Clear();
-                DisplayedServers.AddRange(_ascending ? NetworkServerList.Servers.Values.OrderBy(s => OrderByPropertyDictionary[_orderBy].GetValue(s, null)) :
-                    NetworkServerList.Servers.Values.OrderByDescending(s => OrderByPropertyDictionary[_orderBy].GetValue(s, null)).Where(ServerFilter.MatchesFilters));
+                var filtered = NetworkServerList.Servers.Values.Where(ServerFilter.MatchesFilters);
+                DisplayedServers.AddRange(_ascending
+                    ? filtered.OrderBy(s => OrderByPropertyDictionary[_orderBy].GetValue(s, null))
+                    : filtered.OrderByDescending(s => OrderByPropertyDictionary[_orderBy].GetValue(s, null)));
             }
         }
 
@@ -152,6 +155,38 @@ namespace LmpClient.Windows.ServerList
         private static GUIStyle GetCorrectHyperlinkLabelStyle(ServerInfo server)
         {
             return server.DedicatedServer ? _labelStyle : HyperlinkLabelStyle;
+        }
+
+        public static bool IsFavorite(ServerInfo server)
+        {
+            if (server.ExternalEndpoint == null) return false;
+            var addr = server.ExternalEndpoint.Address.ToString();
+            var port = server.ExternalEndpoint.Port;
+            return SettingsSystem.CurrentSettings.FavoriteServers
+                .Exists(f => f.Address == addr && f.Port == port);
+        }
+
+        private static void ToggleFavorite(ServerInfo server)
+        {
+            if (server.ExternalEndpoint == null) return;
+            var addr = server.ExternalEndpoint.Address.ToString();
+            var port = server.ExternalEndpoint.Port;
+            var existing = SettingsSystem.CurrentSettings.FavoriteServers
+                .Find(f => f.Address == addr && f.Port == port);
+            if (existing != null)
+            {
+                SettingsSystem.CurrentSettings.FavoriteServers.Remove(existing);
+            }
+            else
+            {
+                SettingsSystem.CurrentSettings.FavoriteServers.Add(new FavoriteServerEntry
+                {
+                    Name = server.ServerName ?? addr,
+                    Address = addr,
+                    Port = port
+                });
+            }
+            SettingsSystem.SaveSettings();
         }
     }
 }

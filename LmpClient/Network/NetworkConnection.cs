@@ -114,6 +114,49 @@ namespace LmpClient.Network
                 }
             }
 
+            // NAT hairpin detection (fully local — no external HTTP calls required).
+            //
+            // Routers that don't support NAT hairpin will drop packets sent from inside the LAN
+            // to the router's own external IP.  When a favourite was saved with the external
+            // endpoint (e.g. 72.11.54.20:36492) we need to:
+            //   1. Replace the IP   with 127.0.0.1
+            //   2. Replace the port with the actual local server port (may differ from the
+            //      external NAT port — e.g. external 36492 → internal 8800).
+            bool needsHairpinRedirect = false;
+
+            foreach (var addr in addresses)
+            {
+                if (!IsPublicIPv4(addr)) continue;
+
+                // Check 1: external IP check via HTTP (may fail if offline — non-fatal)
+                var ownExternal = LunaNetUtils.GetOwnExternalIpAddress();
+                if (ownExternal != null && Equals(addr, ownExternal))
+                {
+                    needsHairpinRedirect = true;
+                    break;
+                }
+
+                // Check 2: we're on a private network AND any LMP-like UDP server is
+                // listening locally (the server may be on a different port than 'port')
+                if (IsOnPrivateNetwork() && FindLocalServerPort(port) != -1)
+                {
+                    needsHairpinRedirect = true;
+                    break;
+                }
+            }
+
+            if (needsHairpinRedirect)
+            {
+                var localPort = FindLocalServerPort(port);
+                if (localPort == -1) localPort = port; // no listener found — try external port as-is
+
+                LunaLog.Log($"[LMP]: NAT hairpin detected — redirecting to 127.0.0.1:{localPort} " +
+                            $"(was {string.Join(", ", addresses.Select(a => a.ToString()))}:{port})");
+
+                addresses = new[] { IPAddress.Loopback };
+                port      = localPort;
+            }
+
             var endpoints = addresses.Select(addr => new IPEndPoint(addr, port)).ToArray();
             ConnectToServer(endpoints, password);
         }
@@ -253,6 +296,65 @@ namespace LmpClient.Network
             {
                 LunaLog.Log($"[LMP]: Could not read connection settings: {ex.Message}");
             }
+        }
+
+        // ── NAT hairpin helpers ───────────────────────────────────────────────
+
+        /// <summary>
+        /// Finds the local UDP port an LMP server is actually bound to.
+        /// Returns the port number, or -1 if no suitable listener is found.
+        /// Strategy: prefer the exact <paramref name="externalPort"/> (NAT 1:1), then the LMP
+        /// default 8800, then any other high UDP port bound on this machine.
+        /// </summary>
+        private static int FindLocalServerPort(int externalPort)
+        {
+            try
+            {
+                var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveUdpListeners();
+
+                // Fast path: external port == local port (NAT uses the same port number)
+                if (listeners.Any(ep => ep.Port == externalPort))
+                    return externalPort;
+
+                // LMP default port
+                if (listeners.Any(ep => ep.Port == 8800))
+                    return 8800;
+
+                // Any other non-system port — pick the one numerically closest to 8800
+                var candidate = listeners
+                    .Where(ep => ep.Port >= 1024)
+                    .OrderBy(ep => Math.Abs(ep.Port - 8800))
+                    .Select(ep => ep.Port)
+                    .FirstOrDefault();
+
+                return candidate > 0 ? candidate : -1;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        /// <summary>Returns true for globally-routable IPv4 addresses (not loopback, RFC-1918, or link-local).</summary>
+        private static bool IsPublicIPv4(IPAddress addr)
+        {
+            if (addr.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                return false;
+            if (addr.Equals(IPAddress.Loopback))
+                return false;
+            var b = addr.GetAddressBytes();
+            if (b[0] == 10)                                  return false; // 10/8
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31)   return false; // 172.16-31/12
+            if (b[0] == 192 && b[1] == 168)                 return false; // 192.168/16
+            if (b[0] == 169 && b[1] == 254)                 return false; // 169.254/16 link-local
+            return true;
+        }
+
+        /// <summary>Returns true when our own outbound IPv4 address is in a private range (i.e. we're behind NAT).</summary>
+        private static bool IsOnPrivateNetwork()
+        {
+            var own = LunaNetUtils.GetOwnInternalIPv4Address();
+            return own != null && !IsPublicIPv4(own);
         }
 
         // ── Post-timeout ICMP diagnostics ─────────────────────────────────────

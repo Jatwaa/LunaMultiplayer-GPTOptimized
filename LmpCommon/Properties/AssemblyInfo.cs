@@ -18,4 +18,6 @@ using System.Runtime.InteropServices;
 
 // Tell KSP's AssemblyLoader that this is a managed KSP assembly so the addon
 // binder can resolve it before any dependent assembly (e.g. LmpClient) is loaded.
+#if NET472
 [assembly: KSPAssembly("LmpCommon", 0, 30)]
+#endif

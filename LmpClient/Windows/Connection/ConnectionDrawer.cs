@@ -3,6 +3,7 @@ using LmpClient.Network;
 using LmpClient.Systems.SettingsSys;
 using LmpClient.Windows.Options;
 using LmpClient.Windows.ServerList;
+using LmpCommon;
 using LmpCommon.Enums;
 using UnityEngine;
 
@@ -10,6 +11,8 @@ namespace LmpClient.Windows.Connection
 {
     public partial class ConnectionWindow
     {
+        private static Vector2 _favScrollPos;
+
         protected override void DrawWindowContent(int windowId)
         {
             GUI.DragWindow(MoveRect);
@@ -17,10 +20,43 @@ namespace LmpClient.Windows.Connection
             GUILayout.BeginVertical();
             DrawPlayerNameSection();
             DrawTopButtons();
+            DrawFavoriteServers();
             DrawCustomServers();
 
             GUILayout.Label(MainSystem.Singleton.Status, StatusStyle);
             GUILayout.EndVertical();
+        }
+
+        private static void DrawFavoriteServers()
+        {
+            var favorites = SettingsSystem.CurrentSettings.FavoriteServers;
+            if (favorites.Count == 0) return;
+
+            GUILayout.Label(LocalizationContainer.ConnectionWindowText.FavoriteServers);
+            _favScrollPos = GUILayout.BeginScrollView(_favScrollPos, GUILayout.Width(WindowWidth - 5), GUILayout.MaxHeight(120));
+
+            foreach (var fav in favorites)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(fav.Name, GUILayout.ExpandWidth(true));
+                if (MainSystem.NetworkState <= ClientState.Disconnected)
+                {
+                    if (GUILayout.Button(LocalizationContainer.ConnectionWindowText.Connect, GUILayout.Width(70)))
+                    {
+                        NetworkConnection.ConnectToServer(fav.Address, fav.Port, string.Empty);
+                    }
+                }
+                if (GUILayout.Button("✕", GUILayout.Width(25)))
+                {
+                    SettingsSystem.CurrentSettings.FavoriteServers.Remove(fav);
+                    SettingsSystem.SaveSettings();
+                    GUILayout.EndHorizontal();
+                    break;
+                }
+                GUILayout.EndHorizontal();
+            }
+
+            GUILayout.EndScrollView();
         }
 
         private void DrawCustomServers()

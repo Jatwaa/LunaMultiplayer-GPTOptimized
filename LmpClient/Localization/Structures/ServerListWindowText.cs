@@ -6,5 +6,8 @@
         public string HideEmptyServers { get; set; } = "Hide empty servers";
         public string HidePrivateServers { get; set; } = "Hide private servers";
         public string DedicatedServersOnly { get; set; } = "Show only dedicated servers";
+        public string FavoritesOnly { get; set; } = "Favorites only";
+        public string Search { get; set; } = "Search:";
+        public string FavoritesSection { get; set; } = "Favorites";
     }
 }
