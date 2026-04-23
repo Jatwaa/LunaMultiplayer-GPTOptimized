@@ -13,6 +13,10 @@ upstream `0.29.1` release. Changes are listed newest-first within each section.
 
 ---
 
+### [2026-04-23 14:28] Fix -- update to logic for connecting. Testing confirmed patch successful
+
+---
+
 ## Version
 
 | Component | Old | New |

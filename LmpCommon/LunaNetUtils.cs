@@ -43,6 +43,68 @@ namespace LmpCommon
 
         public static IPAddress GetOwnInternalIPv4Address()
         {
+            // Step 1: OS routing-table lookup — no packets are sent, just a route query.
+            // This reliably picks the correct source IP on multi-homed machines (e.g. a machine
+            // with both Wi-Fi and Ethernet).
+            IPAddress routeIp = null;
+            try
+            {
+                using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                {
+                    socket.Connect("8.8.8.8", 80);
+                    var a = ((IPEndPoint)socket.LocalEndPoint).Address;
+                    if (a != null && !a.Equals(IPAddress.Loopback))
+                        routeIp = a;
+                }
+            }
+            catch { /* fall through */ }
+
+            // Step 2: build a list of candidate IPs from real NICs — those that have a default
+            // gateway configured.  Docker bridge adapters and most VPN tunnel interfaces do NOT
+            // have a gateway address, so they are naturally excluded.
+            var candidates = new System.Collections.Generic.List<IPAddress>();
+            try
+            {
+                foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    if (nic.NetworkInterfaceType == NetworkInterfaceType.Unknown) continue;
+
+                    var props = nic.GetIPProperties();
+                    bool hasGateway = false;
+                    foreach (var gw in props.GatewayAddresses)
+                    {
+                        if (gw.Address.AddressFamily == AddressFamily.InterNetwork &&
+                            !gw.Address.Equals(IPAddress.Any))
+                        { hasGateway = true; break; }
+                    }
+                    if (!hasGateway) continue;
+
+                    foreach (var uni in props.UnicastAddresses)
+                    {
+                        if (uni?.Address?.AddressFamily == AddressFamily.InterNetwork)
+                            candidates.Add(uni.Address);
+                    }
+                }
+            }
+            catch { /* fall through */ }
+
+            // Step 3: if the routing-trick result is on a gateway NIC, use it directly —
+            // this is the most accurate answer on multi-homed machines.
+            if (routeIp != null && candidates.Contains(routeIp))
+                return routeIp;
+
+            // Step 4: routing trick returned a virtual/VPN IP.  Prefer any gateway-bearing NIC.
+            if (candidates.Count > 0)
+                return candidates[0];
+
+            // Step 5: nothing found via routing trick or gateway NICs — fall back to the
+            // routing result anyway (handles unusual networks like genuine 172.x.x.x LANs).
+            if (routeIp != null)
+                return routeIp;
+
+            // Step 6: last resort — original NIC enumeration (original behaviour).
             var ni = GetNetworkInterface(AddressFamily.InterNetwork);
             if (ni == null)
             {

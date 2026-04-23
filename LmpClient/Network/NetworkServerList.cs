@@ -112,11 +112,13 @@ namespace LmpClient.Network
         {
             if (Servers.TryGetValue(serverId, out var serverInfo))
             {
-                var amListeningOnIPv6 =
-                    NetworkMain.ClientConnection.Socket.AddressFamily == AddressFamily.InterNetworkV6;
-
+                // CRITICAL: Never access NetworkMain.ClientConnection.Socket here.
+                // Socket is null until the client has been started (which happens in the send thread).
+                // The reference 0.29.0 never touches Socket; it always sends the real IPv6 address.
+                // LunaNetUtils.GetOwnInternalIPv6Address() returns IPv6Loopback when no suitable IPv6
+                // exists, and the master server already skips IPv6 introduction when loopback is sent.
                 var lanV4 = ServerIsInLocalLan(serverInfo.ExternalEndpoint);
-                var lanV6 = amListeningOnIPv6 && ServerIsInLocalLan(serverInfo.InternalEndpoint6);
+                var lanV6 = ServerIsInLocalLan(serverInfo.InternalEndpoint6);
                 LunaLog.Log($"[LMP]: Connection decision for '{serverInfo.ServerName}' ({serverId}): " +
                             $"IPv4 LAN={lanV4}, IPv6 LAN={lanV6}, External={serverInfo.ExternalEndpoint}, " +
                             $"Internal={serverInfo.InternalEndpoint}, Internal6={serverInfo.InternalEndpoint6}");
@@ -145,37 +147,55 @@ namespace LmpClient.Network
                         expectedNatEndpoint = serverInfo.ExternalEndpoint;
                         pendingNatServerId = serverId;
 
+                        // Ensure client is started so Port reflects the real bound port.
+                        // The send thread will also start it before sending, but we read Port here
+                        // to build the introduction message.
+                        if (NetworkMain.ClientConnection.Status == NetPeerStatus.NotRunning)
+                        {
+                            LunaLog.Log("[LMP]: Client not running — starting it now for NAT introduction");
+                            NetworkMain.ClientConnection.Start();
+                            var spinCount = 0;
+                            while (NetworkMain.ClientConnection.Status != NetPeerStatus.Running && spinCount < 200)
+                            {
+                                Thread.Sleep(10);
+                                spinCount++;
+                            }
+                            if (NetworkMain.ClientConnection.Status != NetPeerStatus.Running)
+                            {
+                                LunaLog.LogError("[LMP]: Client failed to start within 2 seconds — cannot request NAT introduction");
+                                MainSystem.Singleton.Status = "Network client failed to start";
+                                return;
+                            }
+                        }
+
+                        var localPort = NetworkMain.ClientConnection.Port;
+                        if (localPort == 0)
+                        {
+                            LunaLog.LogWarning("[LMP]: Client bound port is 0 — this will break NAT punchthrough. Retrying Start()...");
+                            NetworkMain.ClientConnection.Start();
+                            Thread.Sleep(100);
+                            localPort = NetworkMain.ClientConnection.Port;
+                        }
+
                         var msgData = NetworkMain.CliMsgFactory.CreateNewMessageData<MsIntroductionMsgData>();
                         msgData.Id = serverId;
                         msgData.Token = MainSystem.UniqueIdentifier;
-
-                        var localPort = NetworkMain.ClientConnection.Port;
                         msgData.InternalEndpoint = new IPEndPoint(LunaNetUtils.GetOwnInternalIPv4Address(), localPort);
-                        // Only send IPv6 address if actually listening on IPv6, otherwise send loopback with means "none".
-                        msgData.InternalEndpoint6 = amListeningOnIPv6
-                            ? new IPEndPoint(LunaNetUtils.GetOwnInternalIPv6Address(), localPort)
-                            : new IPEndPoint(IPAddress.IPv6Loopback, localPort);
+                        // Always send the real IPv6 address (GetOwnInternalIPv6Address returns loopback
+                        // when none is available). The master server skips IPv6 introduction when it
+                        // sees loopback, so this is safe.
+                        msgData.InternalEndpoint6 = new IPEndPoint(LunaNetUtils.GetOwnInternalIPv6Address(), localPort);
 
                         var introduceMsg = NetworkMain.MstSrvMsgFactory.CreateNew<MainMstSrvMsg>(msgData);
 
                         MainSystem.Singleton.Status = "Requesting NAT introduction";
                         LunaLog.Log($"[LMP]: Selected connection method = NAT_Punch. " +
                                     $"Token: {MainSystem.UniqueIdentifier}, " +
+                                    $"LocalPort: {localPort}, " +
                                     $"Internal Endpoint: {msgData.InternalEndpoint}, " +
                                     $"Internal Endpoint v6: {msgData.InternalEndpoint6}, " +
                                     $"Expected External: {expectedNatEndpoint}");
                         NetworkSender.QueueOutgoingMessage(introduceMsg);
-
-                        // If the NAT introduction didn't succeed after 10s, fallback to direct connect
-                        Base.SystemBase.TaskFactory.StartNew(() => {
-                            Thread.Sleep(10000);
-                            if (!receivedNATIntroductionSuccessResponse)
-                            {
-                                LunaLog.Log("[LMP]: NAT introduction did not succeed after 10 seconds. Falling back to direct connect.");
-                                MainSystem.Singleton.Status = "NAT timeout — trying direct connect";
-                                NetworkConnection.ConnectToServerCore(new[] { serverInfo.ExternalEndpoint }, Password);
-                            }
-                        });
                     }
                     catch (Exception e)
                     {
@@ -222,7 +242,24 @@ namespace LmpClient.Network
         }
 
         /// <summary>
-        /// We received a NAT punchtrough response from the server, so connect to it
+        /// Returns true when two IPAddresses are the same, treating IPv4-mapped IPv6
+        /// addresses as equal to their IPv4 counterpart.
+        /// </summary>
+        private static bool SameIpAddress(IPAddress a, IPAddress b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+
+            // If both are IPv4-mapped IPv6, or one is IPv4 and the other is mapped IPv6,
+            // compare the underlying IPv4 addresses.
+            var a4 = a.IsIPv4MappedToIPv6 ? a.MapToIPv4() : a;
+            var b4 = b.IsIPv4MappedToIPv6 ? b.MapToIPv4() : b;
+            return a4.Equals(b4);
+        }
+
+        /// <summary>
+        /// We received a NAT punchthrough response from the server, so connect to it.
+        /// Called on the Lidgren receive thread.
         /// </summary>
         public static void HandleNatIntroductionSuccess(NetIncomingMessage msg)
         {
@@ -234,16 +271,25 @@ namespace LmpClient.Network
             }
 
             var sender = msg.SenderEndPoint;
-            if (expectedNatEndpoint != null && !Equals(expectedNatEndpoint.Address, sender.Address))
+            if (expectedNatEndpoint != null && !SameIpAddress(expectedNatEndpoint.Address, sender.Address))
             {
                 LunaLog.LogWarning($"[LMP]: NAT introduction success from unexpected endpoint {sender}. Expected {expectedNatEndpoint.Address}. Proceeding anyway.");
             }
             else
             {
-                LunaLog.Log($"[LMP]: NAT introduction success validated against {sender}. Token: {MainSystem.UniqueIdentifier}");
+                LunaLog.Log($"[LMP]: NAT introduction success from {sender}. Token: {MainSystem.UniqueIdentifier}");
             }
 
             receivedNATIntroductionSuccessResponse = true;
+
+            // Log the current connection state so we can diagnose stale-connection issues
+            var client = NetworkMain.ClientConnection;
+            if (client != null)
+            {
+                LunaLog.Log($"[LMP]: Pre-connect state — peer status: {client.Status}, connection count: {client.ConnectionsCount}, " +
+                            $"current network state: {MainSystem.NetworkState}");
+            }
+
             NetworkConnection.ConnectToServerCore(new []{ sender }, Password);
         }
     }
