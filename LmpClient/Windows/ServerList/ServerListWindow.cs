@@ -6,6 +6,7 @@ using LmpCommon;
 using LmpCommon.Enums;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Reflection;
 using UnityEngine;
 
@@ -159,32 +160,59 @@ namespace LmpClient.Windows.ServerList
 
         public static bool IsFavorite(ServerInfo server)
         {
-            if (server.ExternalEndpoint == null) return false;
-            var addr = server.ExternalEndpoint.Address.ToString();
-            var port = server.ExternalEndpoint.Port;
-            return SettingsSystem.CurrentSettings.FavoriteServers
-                .Exists(f => f.Address == addr && f.Port == port);
+            if (server?.ExternalEndpoint == null) return false;
+            return TryFindFavorite(server.ExternalEndpoint, out _);
+        }
+
+        /// <summary>
+        /// Normalized favorite lookup: trims whitespace, ignores case, and falls back to
+        /// comparing against the internal endpoint so LAN favorites survive restarts.
+        /// </summary>
+        private static bool TryFindFavorite(IPEndPoint endpoint, out FavoriteServerEntry entry)
+        {
+            entry = null;
+            if (endpoint == null) return false;
+            var addr = endpoint.Address.ToString().Trim();
+            var port = endpoint.Port;
+
+            // Exact match first
+            entry = SettingsSystem.CurrentSettings.FavoriteServers
+                .Find(f => string.Equals(f.Address?.Trim(), addr, System.StringComparison.OrdinalIgnoreCase) && f.Port == port);
+            if (entry != null) return true;
+
+            // Fallback: try parsing both addresses as IPAddress and compare structurally
+            if (System.Net.IPAddress.TryParse(addr, out var parsed))
+            {
+                entry = SettingsSystem.CurrentSettings.FavoriteServers
+                    .Find(f => System.Net.IPAddress.TryParse(f.Address, out var favAddr)
+                               && favAddr.Equals(parsed) && f.Port == port);
+            }
+            return entry != null;
         }
 
         private static void ToggleFavorite(ServerInfo server)
         {
-            if (server.ExternalEndpoint == null) return;
-            var addr = server.ExternalEndpoint.Address.ToString();
+            if (server?.ExternalEndpoint == null) return;
+            var addr = server.ExternalEndpoint.Address.ToString().Trim();
             var port = server.ExternalEndpoint.Port;
             var existing = SettingsSystem.CurrentSettings.FavoriteServers
-                .Find(f => f.Address == addr && f.Port == port);
+                .Find(f => string.Equals(f.Address?.Trim(), addr, System.StringComparison.OrdinalIgnoreCase) && f.Port == port);
+
             if (existing != null)
             {
                 SettingsSystem.CurrentSettings.FavoriteServers.Remove(existing);
+                LunaLog.Log($"[LMP]: Removed favorite {addr}:{port}");
             }
             else
             {
+                var name = !string.IsNullOrEmpty(server.ServerName) ? server.ServerName : addr;
                 SettingsSystem.CurrentSettings.FavoriteServers.Add(new FavoriteServerEntry
                 {
-                    Name = server.ServerName ?? addr,
+                    Name = name,
                     Address = addr,
                     Port = port
                 });
+                LunaLog.Log($"[LMP]: Added favorite '{name}' ({addr}:{port})");
             }
             SettingsSystem.SaveSettings();
         }

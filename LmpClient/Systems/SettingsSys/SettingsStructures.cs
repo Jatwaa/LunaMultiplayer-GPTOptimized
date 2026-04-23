@@ -27,7 +27,7 @@ namespace LmpClient.Systems.SettingsSys
         public int Mtu { get; set; } = NetPeerConfiguration.kDefaultMTU;
         public int ChatBuffer { get; set; } = 30;
         public bool AutoExpandMtu { get; set; } = false;
-        public float TimeoutSeconds { get; set; } = 15;
+        public float TimeoutSeconds { get; set; } = 25;
         public ServerFilters ServerFilters { get; set; } = new ServerFilters();
         public List<FavoriteServerEntry> FavoriteServers { get; set; } = new List<FavoriteServerEntry>();
 

@@ -10,6 +10,7 @@ using System;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Threading;
+using System.Threading.Tasks;
 using UniLinq;
 
 namespace LmpClient.Network
@@ -30,7 +31,18 @@ namespace LmpClient.Network
         // ── Disconnect ────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Disconnects the network system.  Must be called from the main thread when killing threads.
+        /// Set by background threads to request the main thread apply ForceQuit vs DisplayDisconnectMessage.
+        /// </summary>
+        public static volatile bool PendingDisconnect = false;
+
+        /// <summary>
+        /// Set by background threads to signal the main thread should force-quit to main menu.
+        /// </summary>
+        public static volatile bool PendingDisconnectForceQuit = false;
+
+        /// <summary>
+        /// Disconnects the network system.  Safe to call from any thread — Unity API decisions
+        /// are deferred to the main thread via <see cref="PendingDisconnect"/>.
         /// </summary>
         public static void Disconnect(string reason = "unknown")
         {
@@ -47,15 +59,10 @@ namespace LmpClient.Network
                     MainSystem.NetworkState = ClientState.DisconnectRequested;
 
                     LunaLog.Log($"[LMP]: Disconnected, reason: {reason}");
-                    if (!HighLogic.LoadedSceneIsEditor && !HighLogic.LoadedSceneIsFlight)
-                    {
-                        MainSystem.Singleton.ForceQuit = true;
-                    }
-                    else
-                    {
-                        //User is in flight so just display a message but don't force them to main menu...
-                        NetworkSystem.DisplayDisconnectMessage = true;
-                    }
+
+                    // Defer HighLogic scene checks to the main thread to avoid Mono/Linux deadlocks
+                    PendingDisconnect = true;
+                    PendingDisconnectForceQuit = false;
 
                     MainSystem.Singleton.Status = $"Disconnected: {reason}";
 
@@ -78,92 +85,106 @@ namespace LmpClient.Network
         {
             // Clear previous failure before a new attempt
             LastFailureReason = "";
+            MainSystem.Singleton.Status = $"Resolving {hostname}...";
 
-            // ── DNS / IP resolution with full diagnostic logging ──────────────
-            IPAddress[] addresses;
-
-            if (IPAddress.TryParse(hostname, out var directIp))
+            // Move all blocking work (DNS, hairpin detection, HTTP lookups) off the Unity thread
+            SystemBase.TaskFactory.StartNew(() =>
             {
-                addresses = new[] { directIp };
-                LunaLog.Log($"[LMP]: Target is a direct IP — {hostname}:{port} (UDP)");
-            }
-            else
-            {
-                LunaLog.Log($"[LMP]: Resolving hostname '{hostname}' for port {port}...");
                 try
                 {
-                    addresses = Dns.GetHostAddresses(hostname);
-                    if (addresses == null || addresses.Length == 0)
+                    // ── DNS / IP resolution with full diagnostic logging ──────────────
+                    IPAddress[] addresses;
+
+                    if (IPAddress.TryParse(hostname, out var directIp))
                     {
-                        var msg = $"Hostname '{hostname}' resolved to no addresses — check for typos or DNS issues";
-                        LunaLog.LogError($"[LMP]: {msg}");
-                        MainSystem.Singleton.Status = msg;
-                        Disconnect(msg);
-                        return;
+                        addresses = new[] { directIp };
+                        LunaLog.Log($"[LMP]: Target is a direct IP — {hostname}:{port} (UDP)");
                     }
-                    LunaLog.Log($"[LMP]: '{hostname}' resolved to {addresses.Length} address(es): " +
-                                $"{string.Join(", ", addresses.Select(a => a.ToString()))}");
+                    else
+                    {
+                        LunaLog.Log($"[LMP]: Resolving hostname '{hostname}' for port {port}...");
+                        try
+                        {
+                            addresses = Dns.GetHostAddresses(hostname);
+                            if (addresses == null || addresses.Length == 0)
+                            {
+                                var msg = $"Hostname '{hostname}' resolved to no addresses — check for typos or DNS issues";
+                                LunaLog.LogError($"[LMP]: {msg}");
+                                MainSystem.Singleton.Status = msg;
+                                Disconnect(msg);
+                                return;
+                            }
+                            LunaLog.Log($"[LMP]: '{hostname}' resolved to {addresses.Length} address(es): " +
+                                        $"{string.Join(", ", addresses.Select(a => a.ToString()))}");
+                        }
+                        catch (Exception ex)
+                        {
+                            var msg = $"Hostname resolution failed for '{hostname}': {ex.Message}";
+                            LunaLog.LogError($"[LMP]: {msg}");
+                            MainSystem.Singleton.Status = msg;
+                            Disconnect(msg);
+                            return;
+                        }
+                    }
+
+                    // NAT hairpin detection (fully local — no external HTTP calls required).
+                    bool needsHairpinRedirect = false;
+
+                    foreach (var addr in addresses)
+                    {
+                        if (!IsPublicIPv4(addr)) continue;
+
+                        // Check 1: external IP check via HTTP (may fail if offline — non-fatal)
+                        var ownExternal = LunaNetUtils.GetOwnExternalIpAddress();
+                        if (ownExternal != null && Equals(addr, ownExternal))
+                        {
+                            needsHairpinRedirect = true;
+                            break;
+                        }
+
+                        // Check 2: we're on a private network AND any LMP-like UDP server is
+                        // listening locally
+                        if (IsOnPrivateNetwork() && FindLocalServerPort(port) != -1)
+                        {
+                            needsHairpinRedirect = true;
+                            break;
+                        }
+                    }
+
+                    if (needsHairpinRedirect)
+                    {
+                        var localPort = FindLocalServerPort(port);
+                        if (localPort == -1)
+                        {
+                            LunaLog.Log($"[LMP]: Hairpin suspected but no local LMP listener found on port {port} or 8800. Keeping original endpoint.");
+                        }
+                        else
+                        {
+                            LunaLog.Log($"[LMP]: NAT hairpin detected — redirecting to 127.0.0.1:{localPort} " +
+                                        $"(was {string.Join(", ", addresses.Select(a => a.ToString()))}:{port})");
+                            addresses = new[] { IPAddress.Loopback };
+                            port = localPort;
+                        }
+                    }
+
+                    var endpoints = addresses.Select(addr => new IPEndPoint(addr, port)).ToArray();
+                    ConnectToServerCore(endpoints, password);
                 }
                 catch (Exception ex)
                 {
-                    var msg = $"Hostname resolution failed for '{hostname}': {ex.Message}";
-                    LunaLog.LogError($"[LMP]: {msg}");
-                    MainSystem.Singleton.Status = msg;
-                    Disconnect(msg);
-                    return;
+                    LunaLog.LogError($"[LMP]: Connection setup failed: {ex}");
+                    Disconnect($"Connection setup failed: {ex.Message}");
                 }
-            }
-
-            // NAT hairpin detection (fully local — no external HTTP calls required).
-            //
-            // Routers that don't support NAT hairpin will drop packets sent from inside the LAN
-            // to the router's own external IP.  When a favourite was saved with the external
-            // endpoint (e.g. 72.11.54.20:36492) we need to:
-            //   1. Replace the IP   with 127.0.0.1
-            //   2. Replace the port with the actual local server port (may differ from the
-            //      external NAT port — e.g. external 36492 → internal 8800).
-            bool needsHairpinRedirect = false;
-
-            foreach (var addr in addresses)
-            {
-                if (!IsPublicIPv4(addr)) continue;
-
-                // Check 1: external IP check via HTTP (may fail if offline — non-fatal)
-                var ownExternal = LunaNetUtils.GetOwnExternalIpAddress();
-                if (ownExternal != null && Equals(addr, ownExternal))
-                {
-                    needsHairpinRedirect = true;
-                    break;
-                }
-
-                // Check 2: we're on a private network AND any LMP-like UDP server is
-                // listening locally (the server may be on a different port than 'port')
-                if (IsOnPrivateNetwork() && FindLocalServerPort(port) != -1)
-                {
-                    needsHairpinRedirect = true;
-                    break;
-                }
-            }
-
-            if (needsHairpinRedirect)
-            {
-                var localPort = FindLocalServerPort(port);
-                if (localPort == -1) localPort = port; // no listener found — try external port as-is
-
-                LunaLog.Log($"[LMP]: NAT hairpin detected — redirecting to 127.0.0.1:{localPort} " +
-                            $"(was {string.Join(", ", addresses.Select(a => a.ToString()))}:{port})");
-
-                addresses = new[] { IPAddress.Loopback };
-                port      = localPort;
-            }
-
-            var endpoints = addresses.Select(addr => new IPEndPoint(addr, port)).ToArray();
-            ConnectToServer(endpoints, password);
+            });
         }
 
         // ── Connect (endpoint overload) ───────────────────────────────────────
 
-        public static void ConnectToServer(IPEndPoint[] endpoints, string password)
+        /// <summary>
+        /// Internal core connection logic. Callers must already be on a background thread.
+        /// For hostname-based connects, use <see cref="ConnectToServer(string, int, string)"/>.
+        /// </summary>
+        public static void ConnectToServerCore(IPEndPoint[] endpoints, string password)
         {
             if (MainSystem.NetworkState > ClientState.Disconnected || endpoints == null || endpoints.Length == 0)
                 return;
@@ -183,6 +204,11 @@ namespace LmpClient.Network
 
                 // Log local network context and Lidgren settings once before any attempt
                 LogConnectionPreamble();
+
+                // Happy Eyeballs-style stagger: for multiple endpoints, don't wait the full
+                // Lidgren timeout on each.  Use InitialConnectionMsTimeout (default 5 s) per endpoint.
+                var perEndpointTimeout = SettingsSystem.CurrentSettings.InitialConnectionMsTimeout;
+                LunaLog.Log($"[LMP]: Attempting {endpoints.Length} endpoint(s) with {perEndpointTimeout} ms per-endpoint timeout");
 
                 foreach (var endpoint in endpoints)
                 {
@@ -221,10 +247,17 @@ namespace LmpClient.Network
                         }
                         client.FlushSendQueue();
 
+                        var waitedMs = 0;
                         while (conn.Status == NetConnectionStatus.InitiatedConnect || conn.Status == NetConnectionStatus.None)
                         {
                             // Waiting for handshake to complete or time out
                             Thread.Sleep(50);
+                            waitedMs += 50;
+                            if (waitedMs >= perEndpointTimeout)
+                            {
+                                LunaLog.Log($"[LMP]: Endpoint {endpoint.Address}:{endpoint.Port} did not handshake within {perEndpointTimeout} ms — trying next");
+                                break;
+                            }
                         }
 
                         if (client.ConnectionStatus == NetConnectionStatus.Connected)
@@ -304,7 +337,7 @@ namespace LmpClient.Network
         /// Finds the local UDP port an LMP server is actually bound to.
         /// Returns the port number, or -1 if no suitable listener is found.
         /// Strategy: prefer the exact <paramref name="externalPort"/> (NAT 1:1), then the LMP
-        /// default 8800, then any other high UDP port bound on this machine.
+        /// default 8800.  Never guesses an arbitrary port.
         /// </summary>
         private static int FindLocalServerPort(int externalPort)
         {
@@ -320,14 +353,8 @@ namespace LmpClient.Network
                 if (listeners.Any(ep => ep.Port == 8800))
                     return 8800;
 
-                // Any other non-system port — pick the one numerically closest to 8800
-                var candidate = listeners
-                    .Where(ep => ep.Port >= 1024)
-                    .OrderBy(ep => Math.Abs(ep.Port - 8800))
-                    .Select(ep => ep.Port)
-                    .FirstOrDefault();
-
-                return candidate > 0 ? candidate : -1;
+                // No known LMP listener found — do not guess an arbitrary port
+                return -1;
             }
             catch
             {
@@ -381,41 +408,62 @@ namespace LmpClient.Network
             }
             catch { /* non-fatal */ }
 
-            // ── ICMP ping ─────────────────────────────────────────────────────
+            // ── ICMP ping (wrapped in a task to prevent Linux/Mono hangs) ────
             try
             {
-                using (var ping = new Ping())
+                // On Linux without CAP_NET_RAW, Ping() can block indefinitely instead of throwing.
+                // Run it on a separate thread with a hard 4-second ceiling.
+                var pingTask = SystemBase.LongRunTaskFactory.StartNew(() =>
                 {
-                    LunaLog.Log($"[LMP]: ICMP ping → {endpoint.Address} (3 s timeout)...");
-                    var reply = ping.Send(endpoint.Address, 3000);
-
-                    if (reply.Status == IPStatus.Success)
+                    using (var ping = new Ping())
                     {
-                        LunaLog.Log($"[LMP]: ICMP ping SUCCESS — {endpoint.Address} responded in {reply.RoundtripTime} ms. " +
-                                    $"Host is reachable; UDP port {endpoint.Port} may be blocked by a firewall or the LMP server is not running.");
-
-                        return $"No UDP response on port {endpoint.Port} — host {endpoint.Address} is reachable " +
-                               $"({reply.RoundtripTime} ms ping). Check: server is running, UDP {endpoint.Port} is " +
-                               $"open in the server firewall, and router port-forwarding is correct.";
+                        return ping.Send(endpoint.Address, 3000);
                     }
-                    else
-                    {
-                        LunaLog.Log($"[LMP]: ICMP ping FAILED — {endpoint.Address} status: {reply.Status}. " +
-                                    $"Host appears unreachable. Possible causes: wrong address, server offline, ICMP blocked.");
+                });
 
-                        return $"No response from {endpoint.Address}:{endpoint.Port} — host also did not respond " +
-                               $"to ping ({reply.Status}). Check: the server address is correct, the server machine is online, " +
-                               $"and you have internet connectivity.";
-                    }
+                LunaLog.Log($"[LMP]: ICMP ping → {endpoint.Address} (3 s timeout, 4 s hard ceiling)...");
+                if (!pingTask.Wait(4000))
+                {
+                    LunaLog.Log($"[LMP]: ICMP ping timed out after 4 seconds — platform may block ICMP or require elevated privileges.");
+                    return $"No response from {endpoint.Address}:{endpoint.Port} (UDP). " +
+                           $"ICMP ping timed out (common on Linux without CAP_NET_RAW). " +
+                           $"Verify the address/port, that the server is running, and that UDP {endpoint.Port} is not firewalled.";
+                }
+
+                var reply = pingTask.Result;
+                if (reply.Status == IPStatus.Success)
+                {
+                    LunaLog.Log($"[LMP]: ICMP ping SUCCESS — {endpoint.Address} responded in {reply.RoundtripTime} ms. " +
+                                $"Host is reachable; UDP port {endpoint.Port} may be blocked by a firewall or the LMP server is not running.");
+
+                    return $"No UDP response on port {endpoint.Port} — host {endpoint.Address} is reachable " +
+                           $"({reply.RoundtripTime} ms ping). Check: server is running, UDP {endpoint.Port} is " +
+                           $"open in the server firewall, and router port-forwarding is correct.";
+                }
+                else
+                {
+                    LunaLog.Log($"[LMP]: ICMP ping FAILED — {endpoint.Address} status: {reply.Status}. " +
+                                $"Host appears unreachable. Possible causes: wrong address, server offline, ICMP blocked.");
+
+                    return $"No response from {endpoint.Address}:{endpoint.Port} — host also did not respond " +
+                           $"to ping ({reply.Status}). Check: the server address is correct, the server machine is online, " +
+                           $"and you have internet connectivity.";
                 }
             }
-            catch (PlatformNotSupportedException)
+            catch (AggregateException ex) when (ex.InnerException is PlatformNotSupportedException)
             {
                 // Unity/Mono on some platforms disallows raw ICMP sockets
                 LunaLog.Log($"[LMP]: ICMP ping not available on this platform — skipping ping check.");
                 return $"No response from {endpoint.Address}:{endpoint.Port} (UDP). " +
                        $"Could not run ping check on this platform. " +
                        $"Verify the address/port, that the server is running, and that UDP {endpoint.Port} is not firewalled.";
+            }
+            catch (AggregateException ex)
+            {
+                LunaLog.Log($"[LMP]: ICMP ping error: {ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}");
+                return $"No response from {endpoint.Address}:{endpoint.Port} (UDP). " +
+                       $"Ping check failed: {ex.InnerException?.Message}. " +
+                       $"Verify the server address, port, and firewall rules.";
             }
             catch (Exception ex)
             {

@@ -7,6 +7,7 @@ using LmpCommon.Time;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -19,6 +20,8 @@ namespace LmpClient.Network
         public static ConcurrentDictionary<long, ServerInfo> Servers { get; } = new ConcurrentDictionary<long, ServerInfo>();
 
         private static bool receivedNATIntroductionSuccessResponse = false;
+        private static IPEndPoint expectedNatEndpoint = null;
+        private static long pendingNatServerId = -1;
 
         /// <summary>
         /// Sends a request for the server list to the master servers
@@ -112,21 +115,35 @@ namespace LmpClient.Network
                 var amListeningOnIPv6 =
                     NetworkMain.ClientConnection.Socket.AddressFamily == AddressFamily.InterNetworkV6;
 
-                if (ServerIsInLocalLan(serverInfo.ExternalEndpoint) || (amListeningOnIPv6 && ServerIsInLocalLan(serverInfo.InternalEndpoint6)))
+                var lanV4 = ServerIsInLocalLan(serverInfo.ExternalEndpoint);
+                var lanV6 = amListeningOnIPv6 && ServerIsInLocalLan(serverInfo.InternalEndpoint6);
+                LunaLog.Log($"[LMP]: Connection decision for '{serverInfo.ServerName}' ({serverId}): " +
+                            $"IPv4 LAN={lanV4}, IPv6 LAN={lanV6}, External={serverInfo.ExternalEndpoint}, " +
+                            $"Internal={serverInfo.InternalEndpoint}, Internal6={serverInfo.InternalEndpoint6}");
+
+                if (lanV4 || lanV6)
                 {
-                    LunaLog.Log("Server is in LAN. Skipping NAT punch");
+                    LunaLog.Log("[LMP]: Server is in LAN. Skipping NAT punch");
                     var endpoints = new List<IPEndPoint>();
-                    if (amListeningOnIPv6 && !serverInfo.InternalEndpoint6.Address.Equals(IPAddress.IPv6Loopback))
+                    if (lanV6 && !serverInfo.InternalEndpoint6.Address.Equals(IPAddress.IPv6Loopback))
                         endpoints.Add(serverInfo.InternalEndpoint6);
-                    if (!serverInfo.InternalEndpoint.Address.Equals(IPAddress.Loopback))
+                    if (lanV4 && !serverInfo.InternalEndpoint.Address.Equals(IPAddress.Loopback))
                         endpoints.Add(serverInfo.InternalEndpoint);
-                    NetworkConnection.ConnectToServer(endpoints.ToArray(), Password);
+                    if (endpoints.Count == 0)
+                    {
+                        LunaLog.LogWarning("[LMP]: LAN detected but no valid internal endpoint; falling back to external");
+                        endpoints.Add(serverInfo.ExternalEndpoint);
+                    }
+                    LunaLog.Log($"[LMP]: Connecting via LAN to {string.Join(", ", endpoints)}");
+                    NetworkConnection.ConnectToServerCore(endpoints.ToArray(), Password);
                 }
                 else
                 {
                     try
                     {
                         receivedNATIntroductionSuccessResponse = false;
+                        expectedNatEndpoint = serverInfo.ExternalEndpoint;
+                        pendingNatServerId = serverId;
 
                         var msgData = NetworkMain.CliMsgFactory.CreateNewMessageData<MsIntroductionMsgData>();
                         msgData.Id = serverId;
@@ -142,19 +159,21 @@ namespace LmpClient.Network
                         var introduceMsg = NetworkMain.MstSrvMsgFactory.CreateNew<MainMstSrvMsg>(msgData);
 
                         MainSystem.Singleton.Status = "Requesting NAT introduction";
-                        LunaLog.Log($"[LMP]: Sending NAT introduction request to master servers. " +
+                        LunaLog.Log($"[LMP]: Selected connection method = NAT_Punch. " +
                                     $"Token: {MainSystem.UniqueIdentifier}, " +
                                     $"Internal Endpoint: {msgData.InternalEndpoint}, " +
-                                    $"Internal Endpoint v6: {msgData.InternalEndpoint6}");
+                                    $"Internal Endpoint v6: {msgData.InternalEndpoint6}, " +
+                                    $"Expected External: {expectedNatEndpoint}");
                         NetworkSender.QueueOutgoingMessage(introduceMsg);
 
-                        // If the NAT introduction didn't succeed after 10s, show a
+                        // If the NAT introduction didn't succeed after 10s, fallback to direct connect
                         Base.SystemBase.TaskFactory.StartNew(() => {
                             Thread.Sleep(10000);
                             if (!receivedNATIntroductionSuccessResponse)
                             {
-                                LunaLog.Log("[LMP]: NAT introduction did not succeed after 10 seconds");
-                                MainSystem.Singleton.Status = "Error: NAT introduction timeout";
+                                LunaLog.Log("[LMP]: NAT introduction did not succeed after 10 seconds. Falling back to direct connect.");
+                                MainSystem.Singleton.Status = "NAT timeout — trying direct connect";
+                                NetworkConnection.ConnectToServerCore(new[] { serverInfo.ExternalEndpoint }, Password);
                             }
                         });
                     }
@@ -163,6 +182,10 @@ namespace LmpClient.Network
                         LunaLog.LogError($"[LMP]: Error connecting to server: {e}");
                     }
                 }
+            }
+            else
+            {
+                LunaLog.LogError($"[LMP]: Cannot introduce to server {serverId} — not found in server list");
             }
         }
 
@@ -188,7 +211,7 @@ namespace LmpClient.Network
                 // checking whether serverEndPoint matches any configured on-link/no-gateway route.
                 Array.Resize(ref ownBytes, 8);
                 Array.Resize(ref serverBytes, 8);
-                if (ownBytes == serverBytes)
+                if (ownBytes.SequenceEqual(serverBytes))
                     return true;
             }
             else
@@ -203,16 +226,25 @@ namespace LmpClient.Network
         /// </summary>
         public static void HandleNatIntroductionSuccess(NetIncomingMessage msg)
         {
-            if (MainSystem.UniqueIdentifier == msg.ReadString())
+            var token = msg.ReadString();
+            if (MainSystem.UniqueIdentifier != token)
             {
-                LunaLog.Log($"[LMP]: Nat introduction success against {msg.SenderEndPoint}. Token: {MainSystem.UniqueIdentifier}");
-                receivedNATIntroductionSuccessResponse = true;
-                NetworkConnection.ConnectToServer(new []{ msg.SenderEndPoint }, Password);
+                LunaLog.LogError($"[LMP]: Incorrect client identifier in NAT introduction success response from {msg.SenderEndPoint}. Expected token: {MainSystem.UniqueIdentifier}, got: {token}");
+                return;
+            }
+
+            var sender = msg.SenderEndPoint;
+            if (expectedNatEndpoint != null && !Equals(expectedNatEndpoint.Address, sender.Address))
+            {
+                LunaLog.LogWarning($"[LMP]: NAT introduction success from unexpected endpoint {sender}. Expected {expectedNatEndpoint.Address}. Proceeding anyway.");
             }
             else
             {
-                LunaLog.LogError($"[LMP]: Incorrect client identifier in NAT introduction success response from {msg.SenderEndPoint}. Token: {MainSystem.UniqueIdentifier}");
+                LunaLog.Log($"[LMP]: NAT introduction success validated against {sender}. Token: {MainSystem.UniqueIdentifier}");
             }
+
+            receivedNATIntroductionSuccessResponse = true;
+            NetworkConnection.ConnectToServerCore(new []{ sender }, Password);
         }
     }
 }

@@ -115,6 +115,7 @@ namespace LmpClient.Network
                 ReceiveThread.Wait(1000);
 
             NetworkConnection.ResetRequested = false;
+            ResetConnectionStaticsAndQueues();
 
             ReceiveThread = SystemBase.LongRunTaskFactory.StartNew(NetworkReceiver.ReceiveMain);
             SendThread = SystemBase.LongRunTaskFactory.StartNew(NetworkSender.SendMain);

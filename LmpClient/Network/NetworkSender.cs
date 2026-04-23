@@ -16,6 +16,8 @@ namespace LmpClient.Network
     {
         public static ConcurrentQueue<IMessageBase> OutgoingMessages { get; set; } = new ConcurrentQueue<IMessageBase>();
 
+        private static int _masterServerRoundRobinIndex = 0;
+
         /// <summary>
         /// Main sending thread
         /// </summary>
@@ -83,17 +85,24 @@ namespace LmpClient.Network
                         {
                             LunaNetUtils.CreateEndpointFromString(SettingsSystem.CurrentSettings.CustomMasterServer)
                         };
-
                     }
-                    LunaLog.Log($"[LMP]: Sending master server request to {masterServers.Length} endpoint(s): {string.Join(", ", (object[])masterServers)}");
-                    foreach (var masterServer in masterServers)
+
+                    if (masterServers.Length == 0)
                     {
-                        // Don't reuse lidgren messages, it does that on it's own
-                        var lidgrenMsg = NetworkMain.ClientConnection.CreateMessage(message.GetMessageSize());
-
-                        message.Serialize(lidgrenMsg);
-                        NetworkMain.ClientConnection.SendUnconnectedMessage(lidgrenMsg, masterServer);
+                        LunaLog.LogWarning("[LMP]: No master servers available — cannot send unconnected message");
+                        return;
                     }
+
+                    // Round-robin to a single master server instead of blasting all of them.
+                    // This reduces duplicate traffic and NAT race conditions.
+                    var idx = Interlocked.Increment(ref _masterServerRoundRobinIndex) % masterServers.Length;
+                    var selectedMaster = masterServers[idx];
+                    LunaLog.Log($"[LMP]: Sending master server request to {selectedMaster} (round-robin {idx + 1}/{masterServers.Length})");
+
+                    // Don't reuse lidgren messages, it does that on it's own
+                    var lidgrenMsg = NetworkMain.ClientConnection.CreateMessage(message.GetMessageSize());
+                    message.Serialize(lidgrenMsg);
+                    NetworkMain.ClientConnection.SendUnconnectedMessage(lidgrenMsg, selectedMaster);
                     // Force send of packets
                     NetworkMain.ClientConnection.FlushSendQueue();
                 }

@@ -9,6 +9,10 @@ upstream `0.29.1` release. Changes are listed newest-first within each section.
 
 ---
 
+### [2026-04-23 10:41] Fix -- Major overhaul on network connections with cleaner logic for local vs non-connections and non-locking processes
+
+---
+
 ## Version
 
 | Component | Old | New |

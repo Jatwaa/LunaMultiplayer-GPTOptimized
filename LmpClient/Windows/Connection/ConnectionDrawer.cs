@@ -5,13 +5,14 @@ using LmpClient.Windows.Options;
 using LmpClient.Windows.ServerList;
 using LmpCommon;
 using LmpCommon.Enums;
+using System.Linq;
 using UnityEngine;
 
 namespace LmpClient.Windows.Connection
 {
     public partial class ConnectionWindow
     {
-        private static Vector2 _favScrollPos;
+        private static int _selectedFavoriteIndex = -1;
 
         protected override void DrawWindowContent(int windowId)
         {
@@ -20,25 +21,44 @@ namespace LmpClient.Windows.Connection
             GUILayout.BeginVertical();
             DrawPlayerNameSection();
             DrawTopButtons();
-            DrawFavoriteServers();
+            DrawFavoriteServersDropdown();
             DrawCustomServers();
 
             GUILayout.Label(MainSystem.Singleton.Status, StatusStyle);
             GUILayout.EndVertical();
         }
 
-        private static void DrawFavoriteServers()
+        /// <summary>
+        /// Replaces the old scrolling favorites list with a compact dropdown selector.
+        /// Selecting a favorite reveals Connect and Remove buttons next to it.
+        /// </summary>
+        private static void DrawFavoriteServersDropdown()
         {
             var favorites = SettingsSystem.CurrentSettings.FavoriteServers;
             if (favorites.Count == 0) return;
 
             GUILayout.Label(LocalizationContainer.ConnectionWindowText.FavoriteServers);
-            _favScrollPos = GUILayout.BeginScrollView(_favScrollPos, GUILayout.Width(WindowWidth - 5), GUILayout.MaxHeight(120));
 
-            foreach (var fav in favorites)
+            // Clamp selection if list shrank (e.g. after a removal)
+            if (_selectedFavoriteIndex >= favorites.Count)
+                _selectedFavoriteIndex = favorites.Count - 1;
+
+            GUILayout.BeginHorizontal();
+            var options = favorites.Select(f => f.Name).ToArray();
+            _selectedFavoriteIndex = GUILayout.SelectionGrid(
+                _selectedFavoriteIndex,
+                options,
+                1,
+                GUILayout.ExpandWidth(true));
+            GUILayout.EndHorizontal();
+
+            if (_selectedFavoriteIndex >= 0 && _selectedFavoriteIndex < favorites.Count)
             {
+                var fav = favorites[_selectedFavoriteIndex];
                 GUILayout.BeginHorizontal();
-                GUILayout.Label(fav.Name, GUILayout.ExpandWidth(true));
+                GUILayout.Label($"{fav.Address}:{fav.Port}", StatusStyle);
+                GUILayout.FlexibleSpace();
+
                 if (MainSystem.NetworkState <= ClientState.Disconnected)
                 {
                     if (GUILayout.Button(LocalizationContainer.ConnectionWindowText.Connect, GUILayout.Width(70)))
@@ -48,15 +68,13 @@ namespace LmpClient.Windows.Connection
                 }
                 if (GUILayout.Button("✕", GUILayout.Width(25)))
                 {
-                    SettingsSystem.CurrentSettings.FavoriteServers.Remove(fav);
+                    SettingsSystem.CurrentSettings.FavoriteServers.RemoveAt(_selectedFavoriteIndex);
                     SettingsSystem.SaveSettings();
-                    GUILayout.EndHorizontal();
-                    break;
+                    if (_selectedFavoriteIndex >= favorites.Count)
+                        _selectedFavoriteIndex = favorites.Count - 1;
                 }
                 GUILayout.EndHorizontal();
             }
-
-            GUILayout.EndScrollView();
         }
 
         private void DrawCustomServers()

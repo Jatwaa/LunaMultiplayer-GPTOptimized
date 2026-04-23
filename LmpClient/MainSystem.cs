@@ -105,6 +105,21 @@ namespace LmpClient
                     HandleException(e, "WindowsHandler-Update");
                 }
 
+                // Apply deferred disconnect actions from background threads on the main thread
+                // to avoid Unity API deadlocks on Linux/Mono
+                if (NetworkConnection.PendingDisconnect)
+                {
+                    NetworkConnection.PendingDisconnect = false;
+                    if (!HighLogic.LoadedSceneIsEditor && !HighLogic.LoadedSceneIsFlight)
+                    {
+                        ForceQuit = true;
+                    }
+                    else
+                    {
+                        NetworkSystem.DisplayDisconnectMessage = true;
+                    }
+                }
+
                 //Force quit
                 if (ForceQuit)
                 {

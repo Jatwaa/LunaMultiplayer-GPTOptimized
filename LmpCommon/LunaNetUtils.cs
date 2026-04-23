@@ -12,6 +12,9 @@ namespace LmpCommon
 {
     public static class LunaNetUtils
     {
+        private static IPAddress cachedExternalIpAddress = null;
+        private static DateTime cachedExternalIpTime = DateTime.MinValue;
+        private static readonly TimeSpan ExternalIpCacheDuration = TimeSpan.FromMinutes(5);
         public static bool IsTcpPortInUse(int port)
         {
             try
@@ -106,6 +109,9 @@ namespace LmpCommon
 
         public static IPAddress GetOwnExternalIpAddress()
         {
+            if (cachedExternalIpAddress != null && (DateTime.UtcNow - cachedExternalIpTime) < ExternalIpCacheDuration)
+                return cachedExternalIpAddress;
+
             var currentIpAddress = TryGetIpAddress("https://ip.42.pl/raw");
 
             if (string.IsNullOrEmpty(currentIpAddress))
@@ -115,7 +121,14 @@ namespace LmpCommon
             if (string.IsNullOrEmpty(currentIpAddress))
                 currentIpAddress = TryGetIpAddress("http://checkip.dyndns.org");
 
-            return IPAddress.TryParse(currentIpAddress, out var ipAddress) ? ipAddress : null;
+            if (IPAddress.TryParse(currentIpAddress, out var ipAddress))
+            {
+                cachedExternalIpAddress = ipAddress;
+                cachedExternalIpTime = DateTime.UtcNow;
+                return ipAddress;
+            }
+
+            return null;
         }
 
         // TODO IPv6: This does not return AAAA records of hostnames.
@@ -162,21 +175,35 @@ namespace LmpCommon
 
         #region Private
 
+        private class TimeoutWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                var request = base.GetWebRequest(address);
+                if (request is System.Net.HttpWebRequest httpRequest)
+                    httpRequest.Timeout = 3000;
+                return request;
+            }
+        }
+
         private static string TryGetIpAddress(string url)
         {
             try
             {
-                using (var client = new WebClient())
-                using (var stream = client.OpenRead(url))
+                using (var client = new TimeoutWebClient())
                 {
-                    if (stream == null) return null;
-                    using (var reader = new StreamReader(stream))
+                    client.Encoding = System.Text.Encoding.UTF8;
+                    using (var stream = client.OpenRead(url))
                     {
-                        var ipRegEx = new Regex(@"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b");
-                        var result = ipRegEx.Matches(reader.ReadToEnd());
+                        if (stream == null) return null;
+                        using (var reader = new StreamReader(stream))
+                        {
+                            var ipRegEx = new Regex(@"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b");
+                            var result = ipRegEx.Matches(reader.ReadToEnd());
 
-                        if (IPAddress.TryParse(result[0].Value, out var ip))
-                            return ip.ToString();
+                            if (result.Count > 0 && IPAddress.TryParse(result[0].Value, out var ip))
+                                return ip.ToString();
+                        }
                     }
                 }
             }
@@ -190,37 +217,45 @@ namespace LmpCommon
 
         private static NetworkInterface GetNetworkInterface(AddressFamily addressFamily)
         {
-            var nics = NetworkInterface.GetAllNetworkInterfaces();
-            if (nics.Length < 1)
-                return null;
-
-            NetworkInterface best = null;
-            foreach (var adapter in nics)
+            try
             {
-                if (adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback || adapter.NetworkInterfaceType == NetworkInterfaceType.Unknown)
-                    continue;
-                var ipVersion = addressFamily == AddressFamily.InterNetwork
-                    ? NetworkInterfaceComponent.IPv4
-                    : NetworkInterfaceComponent.IPv6;
-                if (!adapter.Supports(ipVersion))
-                    continue;
-                if (best == null)
-                    best = adapter;
-                if (adapter.OperationalStatus != OperationalStatus.Up)
-                    continue;
+                var nics = NetworkInterface.GetAllNetworkInterfaces();
+                if (nics.Length < 1)
+                    return null;
 
-                // Make sure this adapter has an address of the specified family
-                var properties = adapter.GetIPProperties();
-                foreach (var unicastAddress in properties.UnicastAddresses)
+                NetworkInterface best = null;
+                foreach (var adapter in nics)
                 {
-                    if (unicastAddress?.Address != null && unicastAddress.Address.AddressFamily == addressFamily)
+                    if (adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback || adapter.NetworkInterfaceType == NetworkInterfaceType.Unknown)
+                        continue;
+                    var ipVersion = addressFamily == AddressFamily.InterNetwork
+                        ? NetworkInterfaceComponent.IPv4
+                        : NetworkInterfaceComponent.IPv6;
+                    if (!adapter.Supports(ipVersion))
+                        continue;
+                    if (best == null)
+                        best = adapter;
+                    if (adapter.OperationalStatus != OperationalStatus.Up)
+                        continue;
+
+                    // Make sure this adapter has an address of the specified family
+                    var properties = adapter.GetIPProperties();
+                    foreach (var unicastAddress in properties.UnicastAddresses)
                     {
-                        // Yes it does, return this network interface.
-                        return adapter;
+                        if (unicastAddress?.Address != null && unicastAddress.Address.AddressFamily == addressFamily)
+                        {
+                            // Yes it does, return this network interface.
+                            return adapter;
+                        }
                     }
                 }
+                return best;
             }
-            return best;
+            catch
+            {
+                // Linux with many virtual interfaces (Docker, WireGuard, systemd-networkd) can hang here
+                return null;
+            }
         }
 
         #endregion
